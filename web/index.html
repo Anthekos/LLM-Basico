@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#131416">
+  <title>LLM Básico · Chat local</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">✳</span>
+          <span>LLM Básico</span>
+        </div>
+        <button class="icon-button mobile-close" id="close-sidebar" aria-label="Cerrar menú">×</button>
+        <button class="new-chat-button" id="new-chat">
+          <span aria-hidden="true">＋</span> Nueva conversación
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-heading">Recientes</div>
+        <nav class="chat-list" id="chat-list" aria-label="Conversaciones"></nav>
+      </div>
+
+      <div class="sidebar-section example-section">
+        <div class="section-heading">PDF de ejemplo</div>
+        <div class="example-list" id="example-list">
+          <div class="skeleton">Cargando ejemplos…</div>
+        </div>
+        <label class="upload-button" for="pdf-input">
+          <span aria-hidden="true">＋</span> Añadir un PDF
+        </label>
+        <input id="pdf-input" type="file" accept="application/pdf,.pdf" hidden>
+        <p class="sidebar-note">El texto seleccionable se añade al corpus local del modelo.</p>
+      </div>
+
+      <div class="sidebar-bottom">
+        <div class="local-badge"><span></span> Modelo ejecutándose en este equipo</div>
+        <button class="profile-button" id="edit-name">
+          <span class="avatar" id="avatar">U</span>
+          <span class="profile-copy"><strong id="profile-name">Usuario</strong><small>Editar nombre</small></span>
+          <span class="profile-edit" aria-hidden="true">⋯</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="open-sidebar" aria-label="Abrir menú">☰</button>
+        <div class="mobile-brand">LLM Básico</div>
+        <div class="model-label"><span class="model-dot"></span> Modelo de caracteres · local</div>
+        <button class="top-profile" id="top-profile" aria-label="Editar nombre">
+          <span class="avatar small-avatar" id="top-avatar">U</span>
+        </button>
+      </header>
+
+      <section class="conversation" id="conversation">
+        <div class="welcome" id="welcome">
+          <div class="welcome-orb" aria-hidden="true">✳</div>
+          <p class="eyebrow">UN EXPERIMENTO EDUCATIVO</p>
+          <h1 id="welcome-title">Hola. ¿Qué exploramos?</h1>
+          <p class="welcome-copy">Un pequeño modelo de caracteres que aprende a partir de ejemplos. Pregunta algo o añade un PDF para ampliar su corpus.</p>
+          <div class="suggestions">
+            <button class="suggestion" data-prompt="¿Que es una red neuronal?">
+              <span class="suggestion-icon">⌘</span><span>¿Qué es una red neuronal?</span><span class="suggestion-arrow">↗</span>
+            </button>
+            <button class="suggestion" data-prompt="Explica la atencion causal">
+              <span class="suggestion-icon">◉</span><span>Explica la atención causal</span><span class="suggestion-arrow">↗</span>
+            </button>
+          </div>
+          <div class="model-disclaimer">Las respuestas son texto generado carácter por carácter; no es un asistente instruido y puede equivocarse.</div>
+        </div>
+        <div class="message-list" id="message-list" aria-live="polite"></div>
+      </section>
+
+      <footer class="composer-area">
+        <form class="composer" id="chat-form">
+          <textarea id="message-input" rows="1" maxlength="1200" placeholder="Escribe un mensaje…" aria-label="Escribe un mensaje"></textarea>
+          <div class="composer-tools">
+            <div class="generation-controls">
+              <label class="control-label" for="temperature">Temp.
+                <select id="temperature" aria-label="Temperatura de generación">
+                  <option value="0.5">0.5</option>
+                  <option value="0.8" selected>0.8</option>
+                  <option value="1.0">1.0</option>
+                  <option value="1.2">1.2</option>
+                </select>
+              </label>
+              <label class="control-label" for="top-k">Top-k
+                <select id="top-k" aria-label="Top-k">
+                  <option value="4">4</option>
+                  <option value="8" selected>8</option>
+                  <option value="12">12</option>
+                  <option value="20">20</option>
+                </select>
+              </label>
+            </div>
+            <button class="send-button" id="send-button" type="submit" aria-label="Enviar mensaje">
+              <span aria-hidden="true">↑</span>
+            </button>
+          </div>
+        </form>
+        <p class="composer-hint">Enter para enviar · Shift + Enter para salto de línea</p>
+      </footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog class="name-dialog" id="name-dialog">
+    <form method="dialog" id="name-form">
+      <div class="dialog-mark">✳</div>
+      <h2>¿Cómo te llamamos?</h2>
+      <p>Tu nombre solo se guarda en este navegador.</p>
+      <input id="name-input" maxlength="32" placeholder="Tu nombre" autocomplete="nickname">
+      <div class="dialog-actions">
+        <button class="dialog-cancel" value="cancel">Ahora no</button>
+        <button class="dialog-save" id="save-name" value="save">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
