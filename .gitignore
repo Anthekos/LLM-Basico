@@ -2,3 +2,8 @@
 __pycache__/
 *.py[cod]
 corpus.txt
+corpus_local.txt
+feedback_recompensa.jsonl
+pdfs_corpus/
+pdfs_corpus.json
+configuracion_modelo.json

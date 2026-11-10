@@ -27,6 +27,18 @@
         <nav class="chat-list" id="chat-list" aria-label="Conversaciones"></nav>
       </div>
 
+      <div class="sidebar-section sidebar-tools">
+        <div class="section-heading">Panel de control</div>
+        <button class="sidebar-action" id="open-corpus-panel">
+          <span aria-hidden="true">▤</span> Corpus local
+          <span class="action-count" id="corpus-count">0</span>
+        </button>
+        <button class="sidebar-action" id="open-model-panel">
+          <span aria-hidden="true">⚙</span> Configuración modelo
+          <span class="action-chevron" aria-hidden="true">›</span>
+        </button>
+      </div>
+
       <div class="sidebar-section example-section">
         <div class="section-heading">PDF de ejemplo</div>
         <div class="example-list" id="example-list">
@@ -46,6 +58,14 @@
           <span class="profile-copy"><strong id="profile-name">Usuario</strong><small>Editar nombre</small></span>
           <span class="profile-edit" aria-hidden="true">⋯</span>
         </button>
+        <label class="online-toggle" for="online-finetuning">
+          <span class="online-copy">
+            <strong>Ajuste online</strong>
+            <small id="online-state">Desactivado · predeterminado</small>
+          </span>
+          <input id="online-finetuning" type="checkbox" role="switch" aria-label="Activar ajuste online">
+          <span class="toggle-track" aria-hidden="true"></span>
+        </label>
       </div>
     </aside>
 
@@ -53,7 +73,8 @@
       <header class="topbar">
         <button class="icon-button menu-button" id="open-sidebar" aria-label="Abrir menú">☰</button>
         <div class="mobile-brand">LLM Básico</div>
-        <div class="model-label"><span class="model-dot"></span> Modelo de caracteres · local</div>
+        <div class="model-label"><span class="model-dot"></span><span id="model-runtime-label">Modelo de caracteres · local</span></div>
+        <button class="top-settings" id="top-model-settings" aria-label="Configuración modelo">⚙</button>
         <button class="top-profile" id="top-profile" aria-label="Editar nombre">
           <span class="avatar small-avatar" id="top-avatar">U</span>
         </button>
@@ -82,34 +103,137 @@
         <form class="composer" id="chat-form">
           <textarea id="message-input" rows="1" maxlength="1200" placeholder="Escribe un mensaje…" aria-label="Escribe un mensaje"></textarea>
           <div class="composer-tools">
-            <div class="generation-controls">
-              <label class="control-label" for="temperature">Temp.
-                <select id="temperature" aria-label="Temperatura de generación">
-                  <option value="0.5">0.5</option>
-                  <option value="0.8" selected>0.8</option>
-                  <option value="1.0">1.0</option>
-                  <option value="1.2">1.2</option>
-                </select>
-              </label>
-              <label class="control-label" for="top-k">Top-k
-                <select id="top-k" aria-label="Top-k">
-                  <option value="4">4</option>
-                  <option value="8" selected>8</option>
-                  <option value="12">12</option>
-                  <option value="20">20</option>
-                </select>
-              </label>
-            </div>
+            <button class="settings-shortcut" id="composer-settings" type="button">⚙ Configuración modelo</button>
             <button class="send-button" id="send-button" type="submit" aria-label="Enviar mensaje">
               <span aria-hidden="true">↑</span>
             </button>
           </div>
         </form>
         <p class="composer-hint">Enter para enviar · Shift + Enter para salto de línea</p>
+        <button class="retry-button" id="retry-last" type="button" hidden>↻ Reintentar última respuesta</button>
       </footer>
     </main>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="control-backdrop" id="control-backdrop"></div>
+  <aside class="control-panel" id="control-panel" aria-hidden="true">
+    <header class="control-header">
+      <div>
+        <p class="control-eyebrow" id="control-eyebrow">PANEL DE CONTROL</p>
+        <h2 id="control-title">Corpus local</h2>
+      </div>
+      <button class="icon-button control-close" id="close-control-panel" aria-label="Cerrar panel">×</button>
+    </header>
+    <section class="control-content" id="corpus-content" hidden>
+      <p class="control-description">El corpus máximo aporta ejemplos base; el corpus local reúne tus notas y documentos. La edición del corpus máximo requiere autenticación de administrador.</p>
+      <div class="corpus-hierarchy" id="corpus-hierarchy">
+        <div><strong>Corpus Máximo · administrador</strong><small id="corpus-maximum-meta">Cargando…</small></div>
+        <div><strong>Corpus Local · editable</strong><small id="corpus-local-meta">Cargando…</small></div>
+      </div>
+      <section class="admin-corpus" aria-labelledby="admin-corpus-title">
+        <h3 id="admin-corpus-title">Administración del corpus máximo</h3>
+        <p class="corpus-list-hint">Acceso local protegido. Las credenciales iniciales son admin / admin y se exige cambiarlas al primer inicio de sesión. El corpus resultante ensambla primero el núcleo fundacional y después el de personalidad; al final se incorpora el corpus local al entrenamiento.</p>
+        <form class="corpus-edit-form" id="admin-login-form">
+          <label for="admin-username">Usuario administrador</label>
+          <input id="admin-username" name="username" autocomplete="username" value="admin" required>
+          <label for="admin-password">Contraseña</label>
+          <input id="admin-password" name="password" type="password" autocomplete="current-password" required>
+          <button class="corpus-submit" type="submit">Iniciar sesión</button>
+        </form>
+        <form class="corpus-edit-form" id="admin-password-form" hidden>
+          <label for="admin-new-password">Nueva contraseña (mínimo 12 caracteres)</label>
+          <input id="admin-new-password" name="new-password" type="password" minlength="12" autocomplete="new-password" required>
+          <button class="corpus-submit" type="submit">Cambiar contraseña</button>
+        </form>
+        <form class="corpus-edit-form" id="admin-corpus-form" hidden>
+          <label for="admin-core-foundation">Núcleo fundacional</label>
+          <p class="corpus-list-hint">Ortografía, gramática y concordancia en español; incluye la bitácora sintáctica de contacto.</p>
+          <textarea id="admin-core-foundation" maxlength="100000" rows="8" required></textarea>
+          <label for="admin-core-personality">Núcleo de personalidad</label>
+          <p class="corpus-list-hint">Turnos Usuario → Pensamiento → Asistente para sobriedad, análisis pausado, seguridad y reconocimiento de límites.</p>
+          <textarea id="admin-core-personality" maxlength="100000" rows="8" required></textarea>
+          <button class="corpus-submit" type="submit">Guardar y reentrenar</button>
+          <button class="message-action" id="admin-logout" type="button">Cerrar sesión administrativa</button>
+        </form>
+        <p class="context-status" id="admin-corpus-status" role="status"></p>
+      </section>
+      <form class="corpus-edit-form" id="corpus-note-form">
+        <label for="corpus-note">Añadir nota o concepto</label>
+        <textarea id="corpus-note" maxlength="10000" rows="3" placeholder="Texto que se incorporará al corpus local…" required></textarea>
+        <button class="corpus-submit" type="submit">Añadir al corpus local</button>
+      </form>
+      <form class="corpus-edit-form remove-concept-form" id="corpus-remove-form">
+        <label for="corpus-remove-text">Quitar un fragmento local exacto</label>
+        <textarea id="corpus-remove-text" maxlength="10000" rows="3" placeholder="Pega el párrafo exacto que quieres eliminar…" required></textarea>
+        <button class="corpus-submit danger-button" type="submit">Quitar fragmento</button>
+      </form>
+      <h3 class="corpus-subheading">Documentos locales</h3>
+      <p class="corpus-list-hint">Puedes previsualizar o eliminar PDFs incorporados. Eliminar un PDF también retira su texto del entrenamiento local.</p>
+      <div class="corpus-list" id="corpus-list">
+        <div class="skeleton">Cargando corpus…</div>
+      </div>
+      <label class="upload-button panel-upload" for="pdf-input"><span aria-hidden="true">＋</span> Añadir un PDF</label>
+    </section>
+    <section class="control-content" id="model-content" hidden>
+      <p class="control-description">Ajusta cómo se muestrea cada siguiente carácter. Los cambios se guardan en este navegador. El texto anterior que exceda la ventana se resume automáticamente en un vector contextual.</p>
+      <div class="setting-card">
+        <div class="setting-heading">
+          <div><h3>Temperatura</h3><p>Controla cuán variadas son las probabilidades.</p></div>
+          <output id="temperature-value" for="temperature-slider">0.8</output>
+        </div>
+        <input id="temperature-slider" type="range" min="0.1" max="3" step="0.1" value="0.8" aria-label="Temperatura del modelo">
+        <div class="range-caption"><span>Más predecible</span><span>Más aleatorio</span></div>
+        <p class="setting-hint">Rango amplio: de 0.1 a 3.0. Valores altos exploran más opciones y pueden producir texto menos coherente.</p>
+      </div>
+      <div class="setting-card">
+        <div class="setting-heading">
+          <div><h3>Top-k</h3><p>Limita los caracteres candidatos en cada paso.</p></div>
+          <output id="top-k-value" for="top-k-slider">8</output>
+        </div>
+        <input id="top-k-slider" type="range" min="1" max="8" step="1" value="8" aria-label="Top-k del modelo">
+        <div class="range-caption"><span>1 candidato</span><span id="top-k-range-max">Vocabulario completo</span></div>
+        <p class="setting-hint">El rango llega hasta todo el vocabulario del tokenizador. Un valor menor reduce las alternativas.</p>
+      </div>
+      <div class="setting-card context-setting-card">
+        <div class="setting-heading">
+          <div><h3>Ventana de contexto</h3><p id="context-window-description">Caracteres previos que el modelo puede consultar.</p></div>
+          <output id="context-window-value" for="context-window-slider">32</output>
+        </div>
+        <input id="context-window-slider" type="range" min="4" max="128" step="4" value="32" aria-label="Ventana de contexto">
+        <div class="range-caption"><span id="context-window-unit-min">4 caracteres</span><span id="context-window-range-max">128 caracteres</span></div>
+        <p class="setting-hint">Cambiarla reconstruye y reentrena el modelo; tardará unos segundos. Una ventana mayor usa más memoria y cómputo.</p>
+        <button class="apply-context" id="apply-context-window" type="button">Aplicar y reentrenar</button>
+        <p class="context-status" id="context-status" role="status"></p>
+      </div>
+      <div class="setting-card salience-setting-card">
+        <div class="setting-heading">
+          <div><h3>Memoria autónoma</h3><p>Guarda interacciones nuevas en el corpus local.</p></div>
+          <output id="salience-threshold-value" for="salience-threshold-slider">0.75</output>
+        </div>
+        <input id="salience-threshold-slider" type="range" min="0" max="1" step="0.05" value="0.75" aria-label="Umbral de saliencia">
+        <div class="range-caption"><span>Más recuerdos</span><span>Solo más novedosos</span></div>
+        <p class="setting-hint">Un umbral menor guarda más interacciones; las fichas incluyen texto extraído de la conversación y se agregan al corpus local.</p>
+        <button class="apply-context" id="apply-salience-threshold" type="button">Guardar umbral</button>
+        <p class="context-status" id="salience-status" role="status"></p>
+      </div>
+      <button class="reset-settings" id="reset-settings" type="button">Restablecer valores iniciales</button>
+    </section>
+  </aside>
+  <dialog class="preview-dialog" id="preview-dialog">
+    <header class="preview-header">
+      <div class="preview-heading">
+        <span class="pdf-icon" aria-hidden="true">▤</span>
+        <div><h2 id="preview-title">Vista previa</h2><p id="preview-meta"></p></div>
+      </div>
+      <button class="icon-button control-close" id="close-preview" aria-label="Cerrar vista previa">×</button>
+    </header>
+    <iframe id="pdf-frame" title="Vista previa del documento PDF" hidden></iframe>
+    <pre class="text-preview" id="text-preview" hidden></pre>
+    <details class="extracted-text">
+      <summary>Ver texto extraído para el modelo</summary>
+      <pre id="extracted-text"></pre>
+    </details>
+  </dialog>
   <dialog class="name-dialog" id="name-dialog">
     <form method="dialog" id="name-form">
       <div class="dialog-mark">✳</div>

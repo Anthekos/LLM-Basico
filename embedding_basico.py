@@ -10,13 +10,14 @@ import numpy as np
 
 from Red_neuronal import RedNeuronal
 from tokenizador_basico import TokenizadorBasico
+from tokenizador_palabras import TokenizadorPalabras
 from muestreo import muestrear_token
 
 
 class EmbeddingBasico:
     def __init__(
         self,
-        tokenizador: TokenizadorBasico,
+        tokenizador: TokenizadorBasico | TokenizadorPalabras,
         dimension: int = 12,
         desviacion_prior: float = 1.0,
         semilla: int = 7,
@@ -57,8 +58,11 @@ class EmbeddingBasico:
 
         self._ids_contexto = ids[:-1]
         self._ids_siguiente = ids[1:]
-        entradas = self.tokenizador.vectorizar(self._ids_contexto)
-        objetivos = self.tokenizador.vectorizar(self._ids_siguiente)
+        indices = np.arange(len(self._ids_contexto))
+        if isinstance(self.tokenizador, TokenizadorPalabras) and len(indices) > 4096:
+            indices = np.linspace(0, len(indices) - 1, 4096, dtype=np.int64)
+        entradas = self.tokenizador.vectorizar(self._ids_contexto[indices])
+        objetivos = self.tokenizador.vectorizar(self._ids_siguiente[indices])
         red = RedNeuronal(
             [self.tokenizador.tamano_vocabulario, self.dimension,
              self.tokenizador.tamano_vocabulario],

@@ -1,0 +1,15 @@
+<|usuario|> Hola, ¿cómo estás? <|pensamiento|> Saludo con una frase breve y natural. <|asistente|> Estoy bien, gracias. ¿En qué puedo ayudarte? <|fin|>
+
+<|usuario|> ¿Puedes explicar una idea con claridad? <|pensamiento|> Organizo la explicación en una idea principal y un ejemplo sencillo. <|asistente|> Claro. Primero presento la idea principal y después doy un ejemplo sencillo. <|fin|>
+
+<|usuario|> Gracias por la explicación. <|pensamiento|> Respondo con cortesía sin añadir información innecesaria. <|asistente|> De nada. Me alegra que haya sido útil. <|fin|>
+
+<|usuario|> No conozco el significado de esa palabra. <|pensamiento|> Reconozco la duda y propongo una forma de continuar. <|asistente|> Puedo explicarla con otras palabras y revisar el contexto. <|fin|>
+
+<|usuario|> ¿La frase las neuronas procesa señales es correcta? <|pensamiento|> Compruebo la concordancia entre el sujeto plural y el verbo. <|asistente|> La forma concordante es las neuronas procesan señales. <|fin|>
+
+<|usuario|> ¿Cómo debe escribirse una pregunta? <|pensamiento|> Recuerdo el uso de los signos de apertura y cierre en español. <|asistente|> Una pregunta lleva un signo de apertura y otro de cierre: ¿Cómo estás? <|fin|>
+
+<|usuario|> ¿Qué información necesitas para explicar una red neuronal? <|pensamiento|> Identifico los conceptos básicos y los describo en orden. <|asistente|> Una red neuronal transforma datos mediante capas, ajusta sus pesos con ejemplos y reduce el error durante el aprendizaje. <|fin|>
+
+<|usuario|> ¿Qué diferencia hay entre un hecho y una opinión? <|pensamiento|> Distingo una afirmación comprobable de una valoración personal. <|asistente|> Un hecho puede contrastarse con evidencia; una opinión expresa una valoración o interpretación. <|fin|>

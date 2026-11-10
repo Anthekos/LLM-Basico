@@ -9,12 +9,19 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 from tokenizador_basico import TokenizadorBasico
+from tokenizador_palabras import TokenizadorPalabras
 
 
-def sanitizar_texto(texto: str, tokenizador: TokenizadorBasico | None = None) -> str:
+def sanitizar_texto(
+    texto: str,
+    tokenizador: TokenizadorBasico | TokenizadorPalabras | None = None,
+) -> str:
     """Normaliza Unicode y elimina caracteres que el vocabulario no admite."""
     tokenizador = tokenizador or TokenizadorBasico()
     texto = unicodedata.normalize("NFC", texto).replace("\r\n", "\n").replace("\r", "\n")
+    sanitizar = getattr(tokenizador, "sanitizar", None)
+    if callable(sanitizar):
+        return sanitizar(texto)
     lineas: list[str] = []
     for linea in texto.split("\n"):
         caracteres = "".join(
@@ -32,7 +39,7 @@ def sanitizar_texto(texto: str, tokenizador: TokenizadorBasico | None = None) ->
 def convertir_pdf_a_corpus(
     ruta_pdf: str | Path,
     ruta_salida: str | Path = "corpus.txt",
-    tokenizador: TokenizadorBasico | None = None,
+    tokenizador: TokenizadorBasico | TokenizadorPalabras | None = None,
 ) -> Path:
     """Extrae texto seleccionable de un PDF y escribe un corpus UTF-8 compatible."""
     ruta_pdf = Path(ruta_pdf)

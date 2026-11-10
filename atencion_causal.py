@@ -1,17 +1,20 @@
-"""Modelo de caracteres con una capa de auto-atencion causal en NumPy."""
+"""Modelo causal de secuencias con auto-atencion en NumPy."""
+
+from collections.abc import Sequence
 
 import numpy as np
 
 from embedding_basico import EmbeddingBasico
 from muestreo import muestrear_token
+from cuantizacion import cuantizar_tensor, multiplicar_cuantizado
 
 
 class ModeloAtencionCausal:
     """Bloque causal pequeno que reutiliza las tablas de un EmbeddingBasico.
 
-    Las consultas de entrenamiento predicen el caracter siguiente desde hasta
-    ``longitud_contexto`` caracteres previos. Una mascara de claves ignora el
-    padding izquierdo y la mascara triangular impide consultar el futuro.
+    Las consultas de entrenamiento predicen el siguiente token desde hasta
+    ``longitud_contexto`` tokens previos. Una mascara ignora el padding
+    izquierdo y la mascara triangular impide consultar el futuro.
     """
 
     def __init__(
@@ -19,6 +22,7 @@ class ModeloAtencionCausal:
         inicializador: EmbeddingBasico,
         longitud_contexto: int = 16,
         semilla: int = 19,
+        num_heads: int | None = None,
     ) -> None:
         if longitud_contexto < 1:
             raise ValueError("longitud_contexto debe ser positiva.")
@@ -31,6 +35,16 @@ class ModeloAtencionCausal:
         self.tokenizador = inicializador.tokenizador
         self.longitud_contexto = longitud_contexto
         self.dimension = inicializador.dimension
+        self.d_model = self.dimension
+        if num_heads is None:
+            num_heads = max(
+                cabezas for cabezas in range(1, min(4, self.d_model) + 1)
+                if self.d_model % cabezas == 0
+            )
+        if num_heads < 1 or self.d_model % num_heads:
+            raise ValueError("d_model debe ser divisible por num_heads.")
+        self.num_heads = num_heads
+        self.head_dim = self.d_model // num_heads
         self.desviacion_prior = inicializador.desviacion_prior
         self.generador = np.random.default_rng(semilla)
 
@@ -44,6 +58,9 @@ class ModeloAtencionCausal:
         self.Wq = self.generador.normal(0.0, escala, (self.dimension, self.dimension))
         self.Wk = self.generador.normal(0.0, escala, (self.dimension, self.dimension))
         self.Wv = self.generador.normal(0.0, escala, (self.dimension, self.dimension))
+        self.W_out = self.generador.normal(
+            0.0, escala, (self.dimension, self.dimension)
+        )
         dimension_oculta = 4 * self.dimension
         self.W1 = self.generador.normal(
             0.0, np.sqrt(2.0 / self.dimension), (self.dimension, dimension_oculta)
@@ -59,6 +76,45 @@ class ModeloAtencionCausal:
         self.beta2 = np.zeros(self.dimension)
         self.epsilon_norm = 1e-5
         self.historial: list[float] = []
+        self._paso_ajuste_online = 0
+        self._momentos_ajuste_online = [
+            (np.zeros_like(parametro), np.zeros_like(parametro))
+            for parametro in self._parametros()
+        ]
+        self.cuantizado = False
+        self._pesos_cuantizados: dict[str, tuple[np.ndarray, float]] = {}
+
+    def habilitar_cuantizacion(self) -> None:
+        """Prepara copias int8 de las matrices densas para inferencia MAP."""
+        matrices = {
+            "Wq": self.Wq,
+            "Wk": self.Wk,
+            "Wv": self.Wv,
+            "W_out": self.W_out,
+            "W1": self.W1,
+            "W2": self.W2,
+            "lm_head": self.embedding_siguiente.T,
+        }
+        self._pesos_cuantizados = {
+            nombre: cuantizar_tensor(peso) for nombre, peso in matrices.items()
+        }
+        self.cuantizado = True
+
+    def deshabilitar_cuantizacion(self) -> None:
+        self.cuantizado = False
+        self._pesos_cuantizados.clear()
+
+    def _multiplicar_inferencia(
+        self,
+        entrada: np.ndarray,
+        peso: np.ndarray,
+        nombre: str,
+        usar_cuantizado: bool,
+    ) -> np.ndarray:
+        if not usar_cuantizado:
+            return entrada @ peso
+        pesos_int8, escala = self._pesos_cuantizados[nombre]
+        return multiplicar_cuantizado(entrada, pesos_int8, escala)
 
     def _parametros(self) -> list[np.ndarray]:
         return [
@@ -75,8 +131,32 @@ class ModeloAtencionCausal:
             self.beta1,
             self.gamma2,
             self.beta2,
+            self.W_out,
             self.embedding_siguiente,
         ]
+
+    @staticmethod
+    def _recortar_gradientes(
+        gradientes: list[np.ndarray], max_norm: float = 1.0
+    ) -> list[np.ndarray]:
+        if max_norm <= 0:
+            raise ValueError("max_norm debe ser positivo.")
+        if any(not np.all(np.isfinite(gradiente)) for gradiente in gradientes):
+            raise FloatingPointError("Los gradientes contienen valores no finitos.")
+        maximo = max(
+            (float(np.max(np.abs(gradiente))) for gradiente in gradientes if gradiente.size),
+            default=0.0,
+        )
+        if maximo == 0.0:
+            return gradientes
+        norma_relativa = np.sqrt(sum(
+            float(np.sum((gradiente / maximo) ** 2))
+            for gradiente in gradientes
+        ))
+        if maximo <= max_norm / norma_relativa:
+            return gradientes
+        factor = (max_norm / norma_relativa) / maximo
+        return [gradiente * factor for gradiente in gradientes]
 
     def _prior_medias(self) -> list[np.ndarray]:
         medias = [np.zeros_like(parametro) for parametro in self._parametros()]
@@ -131,43 +211,80 @@ class ModeloAtencionCausal:
         ids: np.ndarray,
         claves_validas: np.ndarray,
         parametros: list[np.ndarray] | None = None,
+        memoria_comprimida: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         lote, longitud = ids.shape
-        if longitud != self.longitud_contexto:
-            raise ValueError("Los ejemplos deben tener longitud_contexto columnas.")
+        if not 1 <= longitud <= self.longitud_contexto:
+            raise ValueError("La secuencia debe caber en longitud_contexto.")
         if claves_validas.shape != ids.shape:
             raise ValueError("La mascara de claves debe tener la misma forma que los IDs.")
         if np.any(ids < 0) or np.any(ids >= self.tokenizador.tamano_vocabulario):
             raise ValueError("Hay IDs fuera del vocabulario.")
 
+        usar_cuantizado = parametros is None and self.cuantizado
         if parametros is None:
             parametros = self._parametros()
+        if len(parametros[1]) != self.longitud_contexto:
+            raise ValueError("La tabla posicional no coincide con la ventana de contexto.")
         embedding_contexto = parametros[0]
-        embedding_posicion = parametros[1]
+        embedding_posicion = parametros[1][-longitud:]
         Wq, Wk, Wv = parametros[2:5]
-        embedding_siguiente = parametros[13]
+        embedding_siguiente = parametros[14]
         estados = embedding_contexto[ids] + embedding_posicion[None, :, :]
-        consultas = estados @ Wq
-        llaves = estados @ Wk
-        valores = estados @ Wv
-        puntajes = consultas @ np.swapaxes(llaves, 1, 2) / np.sqrt(self.dimension)
+        if memoria_comprimida is not None:
+            memoria_comprimida = np.asarray(memoria_comprimida, dtype=float)
+            if memoria_comprimida.shape != (lote, self.dimension):
+                raise ValueError(
+                    "memoria_comprimida debe tener forma (lote, dimension)."
+                )
+            if not np.all(claves_validas[:, 0]):
+                raise ValueError("La posicion de memoria comprimida debe ser valida.")
+            estados[:, 0, :] = memoria_comprimida + embedding_posicion[0]
+        consultas = self._multiplicar_inferencia(
+            estados, Wq, "Wq", usar_cuantizado
+        ).reshape(
+            lote, longitud, self.num_heads, self.head_dim
+        ).transpose(0, 2, 1, 3)
+        llaves = self._multiplicar_inferencia(
+            estados, Wk, "Wk", usar_cuantizado
+        ).reshape(
+            lote, longitud, self.num_heads, self.head_dim
+        ).transpose(0, 2, 1, 3)
+        valores = self._multiplicar_inferencia(
+            estados, Wv, "Wv", usar_cuantizado
+        ).reshape(
+            lote, longitud, self.num_heads, self.head_dim
+        ).transpose(0, 2, 1, 3)
+        puntajes = consultas @ np.swapaxes(llaves, -1, -2) / np.sqrt(self.head_dim)
 
         causal = np.tril(np.ones((longitud, longitud), dtype=bool))
-        mascara = causal[None, :, :] & claves_validas[:, None, :]
+        mascara = causal[None, None, :, :] & claves_validas[:, None, None, :]
         atencion = self._softmax(puntajes, mascara)
-        contexto = atencion @ valores
-        residual_atencion = estados + contexto
+        contexto_cabezas = atencion @ valores
+        contexto = contexto_cabezas.transpose(0, 2, 1, 3).reshape(
+            lote, longitud, self.d_model
+        )
+        salida_atencion = self._multiplicar_inferencia(
+            contexto, parametros[13], "W_out", usar_cuantizado
+        )
+        residual_atencion = estados + salida_atencion
         normalizado_atencion, cache_norm1 = self._layer_norm(
             residual_atencion, parametros[9], parametros[10]
         )
-        pre_ffn = normalizado_atencion @ parametros[5] + parametros[6]
+        pre_ffn = self._multiplicar_inferencia(
+            normalizado_atencion, parametros[5], "W1", usar_cuantizado
+        ) + parametros[6]
         activacion_ffn = np.maximum(pre_ffn, 0.0)
-        salida_ffn = activacion_ffn @ parametros[7] + parametros[8]
+        salida_ffn = self._multiplicar_inferencia(
+            activacion_ffn, parametros[7], "W2", usar_cuantizado
+        ) + parametros[8]
         residual_ffn = normalizado_atencion + salida_ffn
         salida, cache_norm2 = self._layer_norm(
             residual_ffn, parametros[11], parametros[12]
         )
-        logits = salida @ embedding_siguiente.T
+        logits = self._multiplicar_inferencia(
+            salida, embedding_siguiente.T, "lm_head", usar_cuantizado
+        )
         cache = {
             "ids": ids,
             "estados": estados,
@@ -176,6 +293,8 @@ class ModeloAtencionCausal:
             "valores": valores,
             "atencion": atencion,
             "contexto": contexto,
+            "contexto_cabezas": contexto_cabezas,
+            "salida_atencion": salida_atencion,
             "residual_atencion": residual_atencion,
             "normalizado_atencion": normalizado_atencion,
             "cache_norm1": cache_norm1,
@@ -201,7 +320,7 @@ class ModeloAtencionCausal:
             parametros = self._parametros()
         embedding_contexto = parametros[0]
         embedding_posicion = parametros[1]
-        embedding_siguiente = parametros[13]
+        embedding_siguiente = parametros[14]
         logits, cache = self._adelante(ids, claves_validas, parametros)
         logits_finales = logits[:, -1, :]
         logits_estables = logits_finales - np.max(logits_finales, axis=1, keepdims=True)
@@ -250,9 +369,23 @@ class ModeloAtencionCausal:
 
         # Residual de atencion: residual_atencion = estados + atencion @ valores.
         gradiente_estados = gradiente_residual_atencion.copy()
-        gradiente_contexto = gradiente_residual_atencion
-        gradiente_atencion = gradiente_contexto @ np.swapaxes(cache["valores"], 1, 2)
-        gradiente_valores = np.swapaxes(cache["atencion"], 1, 2) @ gradiente_contexto
+        gradiente_salida_atencion = gradiente_residual_atencion
+        gradiente_W_out = np.einsum(
+            "bti,btj->ij", cache["contexto"], gradiente_salida_atencion
+        )
+        gradiente_contexto = gradiente_salida_atencion @ parametros[13].T
+        longitud = cache["ids"].shape[1]
+        gradiente_contexto_cabezas = gradiente_contexto.reshape(
+            lote, longitud, self.num_heads, self.head_dim
+        ).transpose(0, 2, 1, 3)
+        gradiente_atencion = (
+            gradiente_contexto_cabezas
+            @ np.swapaxes(cache["valores"], -1, -2)
+        )
+        gradiente_valores = (
+            np.swapaxes(cache["atencion"], -1, -2)
+            @ gradiente_contexto_cabezas
+        )
 
         atencion = cache["atencion"]
         gradiente_puntajes = atencion * (
@@ -260,10 +393,22 @@ class ModeloAtencionCausal:
             - np.sum(gradiente_atencion * atencion, axis=-1, keepdims=True)
         )
         gradiente_puntajes = np.where(cache["mascara"], gradiente_puntajes, 0.0)
-        escala = 1.0 / np.sqrt(self.dimension)
+        escala = 1.0 / np.sqrt(self.head_dim)
         gradiente_consultas = gradiente_puntajes @ cache["llaves"] * escala
-        gradiente_llaves = np.swapaxes(gradiente_puntajes, 1, 2) @ cache["consultas"] * escala
+        gradiente_llaves = (
+            np.swapaxes(gradiente_puntajes, -1, -2)
+            @ cache["consultas"] * escala
+        )
 
+        gradiente_consultas = gradiente_consultas.transpose(0, 2, 1, 3).reshape(
+            lote, longitud, self.d_model
+        )
+        gradiente_llaves = gradiente_llaves.transpose(0, 2, 1, 3).reshape(
+            lote, longitud, self.d_model
+        )
+        gradiente_valores = gradiente_valores.transpose(0, 2, 1, 3).reshape(
+            lote, longitud, self.d_model
+        )
         gradiente_Wq = np.einsum("bti,btj->ij", cache["estados"], gradiente_consultas)
         gradiente_Wk = np.einsum("bti,btj->ij", cache["estados"], gradiente_llaves)
         gradiente_Wv = np.einsum("bti,btj->ij", cache["estados"], gradiente_valores)
@@ -296,9 +441,95 @@ class ModeloAtencionCausal:
             gradiente_beta1,
             gradiente_gamma2,
             gradiente_beta2,
+            gradiente_W_out,
             gradiente_embedding_siguiente,
         ]
         return float(perdida), gradientes
+
+    def comprimir_contexto(self, ids: np.ndarray) -> np.ndarray:
+        """Resume bloques previos en un vector mediante el estado causal final."""
+        ids = np.asarray(ids, dtype=np.int64)
+        if ids.ndim != 1 or ids.size == 0:
+            raise ValueError("ids debe ser un vector no vacio.")
+        if np.any(ids < 0) or np.any(ids >= self.tokenizador.tamano_vocabulario):
+            raise ValueError("Hay IDs fuera del vocabulario.")
+
+        estados_resumen: list[np.ndarray] = []
+        for inicio in range(0, len(ids), self.longitud_contexto):
+            bloque = ids[inicio:inicio + self.longitud_contexto]
+            entrada = np.zeros((1, self.longitud_contexto), dtype=np.int64)
+            validas = np.zeros_like(entrada, dtype=bool)
+            entrada[0, -len(bloque):] = bloque
+            validas[0, -len(bloque):] = True
+            _, cache = self._adelante(entrada, validas)
+            estados_resumen.append(cache["salida"][0, -1].copy())
+
+        pesos = np.linspace(0.5, 1.0, len(estados_resumen))
+        pesos /= np.sum(pesos)
+        memoria = np.average(np.stack(estados_resumen), axis=0, weights=pesos)
+        if not np.all(np.isfinite(memoria)):
+            raise FloatingPointError("La memoria comprimida contiene valores no finitos.")
+        return memoria
+
+    def ajuste_online(
+        self,
+        texto: str,
+        tasa_aprendizaje: float = 0.0005,
+        maximo_ejemplos: int = 32,
+        recompensa: int = 1,
+    ) -> float:
+        """Aplica un paso de aprendizaje ponderado por una recompensa +/-1."""
+        if tasa_aprendizaje <= 0 or maximo_ejemplos < 1:
+            raise ValueError("tasa_aprendizaje y maximo_ejemplos deben ser positivos.")
+        if recompensa not in {-1, 1}:
+            raise ValueError("recompensa debe ser -1 o 1.")
+        entradas, validas, objetivos = self._crear_ejemplos(texto[-256:])
+        inicio = max(0, len(objetivos) - maximo_ejemplos)
+        perdida, gradientes = self._gradientes_lote(
+            entradas[inicio:], validas[inicio:], objetivos[inicio:]
+        )
+        if not np.isfinite(perdida) or any(
+            not np.all(np.isfinite(gradiente)) for gradiente in gradientes
+        ):
+            raise FloatingPointError("La pérdida o los gradientes del ajuste online no son finitos.")
+
+        gradientes = [gradiente * recompensa for gradiente in gradientes]
+        gradientes = self._recortar_gradientes(gradientes, max_norm=1.0)
+
+        parametros = self._parametros()
+        if any(not np.all(np.isfinite(parametro)) for parametro in parametros):
+            raise FloatingPointError("Los pesos del modelo ya contienen valores no finitos.")
+        recuantizar = self.cuantizado
+        parametros_anteriores = [parametro.copy() for parametro in parametros]
+        siguiente_paso = self._paso_ajuste_online + 1
+        try:
+            nuevos_momentos = self.inicializador._actualizar_adam(
+                parametros,
+                gradientes,
+                self._momentos_ajuste_online,
+                siguiente_paso,
+                tasa_aprendizaje,
+            )
+            if (
+                any(not np.all(np.isfinite(parametro)) for parametro in parametros)
+                or any(
+                    not np.all(np.isfinite(momento))
+                    for primer_momento, segundo_momento in nuevos_momentos
+                    for momento in (primer_momento, segundo_momento)
+                )
+            ):
+                raise FloatingPointError(
+                    "La actualización online produjo pesos o momentos no finitos."
+                )
+        except Exception:
+            for parametro, anterior in zip(parametros, parametros_anteriores):
+                parametro[...] = anterior
+            raise
+        self._momentos_ajuste_online = nuevos_momentos
+        self._paso_ajuste_online = siguiente_paso
+        if recuantizar:
+            self.habilitar_cuantizacion()
+        return perdida
 
     def _crear_ejemplos(self, texto: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ids = self.tokenizador.codificar(texto)
@@ -349,6 +580,7 @@ class ModeloAtencionCausal:
                         parametros, prior_medias, gradientes
                     )
                 ]
+                gradientes = self._recortar_gradientes(gradientes, max_norm=1.0)
                 paso += 1
                 momentos = self.inicializador._actualizar_adam(
                     parametros, gradientes, momentos, paso, tasa_aprendizaje
@@ -431,6 +663,7 @@ class ModeloAtencionCausal:
                     )
 
                 gradientes = gradientes_medias + gradientes_log_desvios
+                gradientes = self._recortar_gradientes(gradientes, max_norm=1.0)
                 paso += 1
                 momentos = self.inicializador._actualizar_adam(
                     parametros, gradientes, momentos, paso, tasa_aprendizaje
@@ -457,17 +690,38 @@ class ModeloAtencionCausal:
         contexto: str,
         inferencia: str = "map",
         muestras: int = 100,
+        memoria_comprimida: np.ndarray | None = None,
     ) -> np.ndarray:
         ids = self.tokenizador.codificar(contexto)
         if len(ids) == 0:
             raise ValueError("El contexto debe contener al menos un caracter.")
-        ids = ids[-self.longitud_contexto:]
-        entrada = np.zeros((1, self.longitud_contexto), dtype=np.int64)
-        validas = np.zeros_like(entrada, dtype=bool)
-        entrada[0, -len(ids):] = ids
-        validas[0, -len(ids):] = True
+        if memoria_comprimida is not None:
+            if self.longitud_contexto < 2:
+                raise ValueError(
+                    "La memoria comprimida necesita una ventana de al menos dos posiciones."
+                )
+            ids = ids[-(self.longitud_contexto - 1):]
+            entrada = np.concatenate((np.zeros(1, dtype=np.int64), ids))[None, :]
+            if entrada.shape[1] > self.longitud_contexto:
+                raise ValueError("La memoria y el contexto exceden la ventana posicional.")
+            validas = np.ones_like(entrada, dtype=bool)
+            memoria_comprimida = np.asarray(memoria_comprimida, dtype=float)
+            if memoria_comprimida.shape != (self.dimension,):
+                raise ValueError(
+                    f"memoria_comprimida debe tener forma ({self.dimension},)."
+                )
+            memoria_lote = memoria_comprimida[None, :]
+        else:
+            ids = ids[-self.longitud_contexto:]
+            entrada = np.zeros((1, self.longitud_contexto), dtype=np.int64)
+            validas = np.zeros_like(entrada, dtype=bool)
+            entrada[0, -len(ids):] = ids
+            validas[0, -len(ids):] = True
+            memoria_lote = None
         if inferencia == "map":
-            logits, _ = self._adelante(entrada, validas)
+            logits, _ = self._adelante(
+                entrada, validas, memoria_comprimida=memoria_lote
+            )
             return EmbeddingBasico._softmax(logits[:, -1, :])[0]
         if inferencia != "variacional":
             raise ValueError("inferencia debe ser 'map' o 'variacional'.")
@@ -484,7 +738,10 @@ class ModeloAtencionCausal:
                 media + desviacion * self.generador.normal(size=media.shape)
                 for media, desviacion in zip(medias, desviaciones)
             ]
-            logits, _ = self._adelante(entrada, validas, muestra)
+            logits, _ = self._adelante(
+                entrada, validas, muestra,
+                memoria_comprimida=memoria_lote,
+            )
             promedio += EmbeddingBasico._softmax(logits[:, -1, :])[0] / muestras
         return promedio
 
@@ -498,18 +755,49 @@ class ModeloAtencionCausal:
         top_k: int | None = 10,
         penalizacion_repeticion: float = 1.05,
         tamano_ngram_sin_repetir: int = 4,
+        memoria_comprimida: np.ndarray | None = None,
+        evitar_salto_inicial: bool = False,
+        stop_sequences: Sequence[str] = (),
     ) -> str:
         if cantidad < 0:
             raise ValueError("cantidad no puede ser negativa.")
         if cantidad and not inicio:
             raise ValueError("inicio debe contener al menos un caracter.")
+        if any(
+            not isinstance(secuencia, str) or not secuencia
+            for secuencia in stop_sequences
+        ):
+            raise ValueError("Cada secuencia de parada debe ser un texto no vacio.")
         ids = self.tokenizador.codificar(inicio)
         inicio = self.tokenizador.decodificar(ids)
         generador = np.random.default_rng(semilla)
         resultado = inicio
         historial_ids = ids.tolist()
-        for _ in range(cantidad):
-            probabilidades = self.probabilidades_siguiente(resultado, inferencia=inferencia)
+        for paso in range(cantidad):
+            probabilidades = self.probabilidades_siguiente(
+                resultado,
+                inferencia=inferencia,
+                memoria_comprimida=memoria_comprimida,
+            )
+            if paso == 0 and evitar_salto_inicial:
+                id_salto = self.tokenizador.caracter_a_id.get("\n")
+                if id_salto is not None:
+                    probabilidades[id_salto] = 0.0
+                    suma = np.sum(probabilidades)
+                    if not np.isfinite(suma) or suma <= 0:
+                        raise FloatingPointError(
+                            "No quedan probabilidades válidas tras excluir el salto inicial."
+                        )
+                    probabilidades /= suma
+            id_pad = getattr(self.tokenizador, "id_pad", None)
+            if id_pad is not None:
+                probabilidades[id_pad] = 0.0
+                suma = np.sum(probabilidades)
+                if not np.isfinite(suma) or suma <= 0:
+                    raise FloatingPointError(
+                        "No quedan probabilidades válidas tras excluir PAD."
+                    )
+                probabilidades /= suma
             siguiente = muestrear_token(
                 probabilidades,
                 historial_ids,
@@ -520,5 +808,20 @@ class ModeloAtencionCausal:
                 tamano_ngram_sin_repetir,
             )
             historial_ids.append(siguiente)
-            resultado += self.tokenizador.decodificar([siguiente])
+            anexar_token = getattr(self.tokenizador, "anexar_token", None)
+            if callable(anexar_token):
+                resultado = anexar_token(resultado, siguiente)
+            else:
+                resultado += self.tokenizador.decodificar([siguiente])
+            secuencia_parada = next(
+                (
+                    secuencia
+                    for secuencia in stop_sequences
+                    if resultado.endswith(secuencia)
+                ),
+                None,
+            )
+            if secuencia_parada is not None:
+                resultado = resultado[:-len(secuencia_parada)].rstrip()
+                break
         return resultado

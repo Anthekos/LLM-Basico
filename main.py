@@ -94,17 +94,29 @@ def ejecutar_modelo_atencion(
     ventana: int,
     inferencia: str = "map",
     verbose: bool = False,
+    dimension: int = 12,
+    num_heads: int = 4,
 ) -> None:
     tokenizador = TokenizadorBasico()
-    inicializador = EmbeddingBasico(tokenizador, dimension=12, desviacion_prior=1.0)
+    inicializador = EmbeddingBasico(
+        tokenizador, dimension=dimension, desviacion_prior=1.0
+    )
     print("Entrenando la red neuronal para inicializar los embeddings...")
     perdida_red = inicializador.entrenar_inicializacion_red(
         texto, epocas=epocas_red, tasa_aprendizaje=0.03
     )
     print(f"Error de inicializacion: {perdida_red[0]:.4f} -> {perdida_red[-1]:.4f}")
 
-    modelo = ModeloAtencionCausal(inicializador, longitud_contexto=ventana)
-    print(f"Entrenando auto-atencion causal (ventana={ventana}, inferencia={inferencia})...")
+    modelo = ModeloAtencionCausal(
+        inicializador,
+        longitud_contexto=ventana,
+        num_heads=num_heads,
+    )
+    print(
+        "Entrenando auto-atencion causal "
+        f"(d_model={modelo.d_model}, cabezas={modelo.num_heads}, "
+        f"head_dim={modelo.head_dim}, ventana={ventana}, inferencia={inferencia})..."
+    )
     if inferencia == "map":
         historial = modelo.entrenar_map(
             texto, epocas=epocas_atencion, tasa_aprendizaje=0.01
@@ -135,6 +147,7 @@ def ejecutar_modelo_atencion(
         print(np.array2string(modelo.embedding_posicion, precision=3))
         for nombre, matriz in (
             ("Wq", modelo.Wq), ("Wk", modelo.Wk), ("Wv", modelo.Wv),
+            ("W_out", modelo.W_out),
             ("W1 (FFN)", modelo.W1), ("W2 (FFN)", modelo.W2),
             ("gamma LayerNorm 1", modelo.gamma1),
             ("gamma LayerNorm 2", modelo.gamma2),
@@ -233,12 +246,21 @@ def main() -> None:
                         help="etapas de entrenamiento MAP de la atencion causal")
     parser.add_argument("--ventana", type=int, default=16,
                         help="longitud maxima del contexto para la atencion causal")
+    parser.add_argument("--d-model", type=int, default=12,
+                        help="dimension de las representaciones del transformer")
+    parser.add_argument("--num-heads", type=int, default=4,
+                        help="cantidad de cabezas de atencion causal")
     argumentos = parser.parse_args()
 
     if argumentos.atencion:
+        if argumentos.d_model < 1 or argumentos.num_heads < 1:
+            parser.error("--d-model y --num-heads deben ser positivos.")
+        if argumentos.d_model % argumentos.num_heads:
+            parser.error("--d-model debe ser divisible por --num-heads.")
         ejecutar_modelo_atencion(
             argumentos.texto, argumentos.epocas_red, argumentos.epocas_atencion,
             argumentos.ventana, argumentos.inferencia, argumentos.verbose,
+            argumentos.d_model, argumentos.num_heads,
         )
         return
     if argumentos.bayesiano:
